@@ -1,0 +1,46 @@
+-- 1. Таблица сырых логов (хранится 30 дней)
+CREATE TABLE user_events (
+    user_id UInt32,
+    event_type String,
+    points_spent UInt32,
+    event_time DateTime
+) ENGINE = MergeTree()
+ORDER BY (event_time, user_id)
+TTL event_time + INTERVAL 30 DAY DELETE;
+
+-- 2. Агрегированная таблица (хранится 180 дней)
+CREATE TABLE logs_agg (
+    event_type String, -- принимает информацию от MV в соответствующем формате
+    event_time DateTime, -- принимает информацию от MV в соответствующем формате
+    uniq_users AggregateFunction(uniq, UInt32), -- хранит состояние, принимает информацию от MV в соответствующем формате
+    sum_points AggregateFunction(sum, UInt32), -- хранит состояние, принимает информацию от MV в соответствующем формате
+    count_events AggregateFunction(count, UInt32) -- хранит состояние, принимает информацию от MV в соответствующем формате
+) ENGINE = AggregatingMergeTree()
+ORDER BY (event_type, event_time) -- должны совпадать с колонками MV, которые в группировке
+TTL event_time + INTERVAL 180 DAY DELETE;
+
+-- 3. Materialized View (создает состояние "уникальные пользователи", "сумма баллов", "количество событий" (считает) и передает в агрегированную таблицу)
+CREATE MATERIALIZED VIEW logs_mv
+TO logs_agg -- куда вставляются данные
+AS
+SELECT
+    event_type, -- event_type - это название столбца в user_events и logs_agg, но если их названия отличаются, то после AS нужно указывать название столбца из агрегированной таблице - только так: указав явно столбец для MV, оно поймет, куда вставлять данные из сырой таблицы в агрегатную
+    event_time, -- event_time - это название столбца в user_events и logs_agg, но если их названия отличаются, то после AS нужно указывать название столбца из агрегированной таблице - только так: указав явно столбец для MV, оно поймет, куда вставлять данные из сырой таблицы в агрегатную
+    uniqState(user_id) AS uniq_users, -- State считает и фиксирует промежуточное состояние; аргумент должен быть названия колонки из исходной таблицы, а после AS указывается то, как названа колонка в агрегированной таблице
+    sumState(points_spent) AS sum_points, -- State считает и фиксирует промежуточное состояние; аргумент должен быть названия колонки из исходной таблицы, а после AS указывается то, как названа колонка в агрегированной таблице
+    countState() AS count_events -- State считает и фиксирует промежуточное состояние; не требует аргумента
+FROM user_events -- откуда берутся данные
+GROUP BY event_type, event_time; -- должны совпадать с колонками агрегированной таблицы, которые в сортировке
+
+-- 4. Запрос, показывающий Retention
+
+-- 5. Запрос с группировками по быстрой аналитике по дням
+SELECT 
+    toDate(event_time) AS event_day, --форматируем под дату без времени
+    event_type,
+    uniqMerge(uniq_users) AS unique_users, -- Merge преобразует состояние (бинарное значение) в готовое значение
+    sumMerge(sum_points) AS total_spent, -- Merge преобразует состояние (бинарное значение) в готовое значение
+    countMerge(count_events) AS total_actions -- Merge преобразует состояние (бинарное значение) в готовое значение
+FROM logs_agg
+GROUP BY event_day, event_type -- по аналогии с базовым SQL должны указываться все столбцы, которые не участвуют в расчетах
+ORDER BY event_day, event_type;
