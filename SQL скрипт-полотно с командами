@@ -32,7 +32,33 @@ SELECT
 FROM user_events -- откуда берутся данные
 GROUP BY event_type, event_time; -- должны совпадать с колонками агрегированной таблицы, которые в сортировке
 
--- 4. Запрос, показывающий Retention
+-- 4. Запрос, показывающий Retention. Нужно посмотреть активность в течение 7 дней от первой даты каждого пользователя, если хотя бы одна активность есть в течение недели, то это идет в статистику
+WITH
+--Находим пользователей в первый активный день 
+user_first_events AS (
+SELECT 
+	user_id, 
+	MIN(event_time) AS first_event_date
+FROM user_events
+GROUP BY user_id
+ORDER BY user_id
+),
+--Находим пользователей в течение следующих 7-ми активных дней, используя результат предыдущего запроса
+returned_users AS (
+SELECT ue.user_id
+FROM user_events ue
+JOIN user_first_events ufe 
+ON ue.user_id = ufe.user_id
+WHERE ue.event_time > ufe.first_event_date -- исключает первый день активности
+AND ue.event_time <= ufe.first_event_date + INTERVAL 7 DAY
+GROUP BY ue.user_id
+)
+--Основной запрос, который возвращает таблицу в нужном виде по условию задачи 
+SELECT 
+	COUNT(*) AS total_users_day_0, 
+	(SELECT COUNT(*) FROM returned_users) AS returned_in_7_days, 
+	(returned_in_7_days / total_users_day_0 ) * 100 AS retention_7d_percent 
+FROM user_first_events;
 
 -- 5. Запрос с группировками по быстрой аналитике по дням
 SELECT 
